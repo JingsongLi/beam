@@ -162,6 +162,19 @@
   </build>
 
   <dependencies>
+
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-lang3</artifactId>
+      <version>3.5</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.flink</groupId>
+      <artifactId>flink-statebackend-rocksdb_2.10</artifactId>
+      <version>${flink.version}</version>
+    </dependency>
+
     <!-- Flink dependencies -->
     <dependency>
       <groupId>org.apache.flink</groupId>
@@ -295,11 +308,11 @@
     </dependency>
 
     <!-- Test scoped -->
-    <dependency>
-      <groupId>org.apache.commons</groupId>
-      <artifactId>commons-lang3</artifactId>
-      <scope>test</scope>
-    </dependency>
+    <!--<dependency>-->
+      <!--<groupId>org.apache.commons</groupId>-->
+      <!--<artifactId>commons-lang3</artifactId>-->
+      <!--<scope>test</scope>-->
+    <!--</dependency>-->
 
     <dependency>
       <groupId>org.hamcrest</groupId>
