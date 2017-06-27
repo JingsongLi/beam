@@ -80,9 +80,7 @@ public class HBaseExternalStore<K, V> implements ExternalStore<K, V> {
       Result[] results = table.get(gets);
       List<V> result = new ArrayList<>();
       for (Result r : results) {
-        if (r.getRow() != null) {
-          result.add(resultFn.apply(r));
-        }
+        result.add(resultFn.apply(r));
       }
       return result;
     } catch (IOException e) {
