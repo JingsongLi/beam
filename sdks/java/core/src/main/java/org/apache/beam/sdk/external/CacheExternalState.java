@@ -34,16 +34,9 @@ public class CacheExternalState<K, V> implements ExternalState<K, V> {
   @Override
   public void setup() {
     store.setup();
-    initCache();
-  }
-
-  private void initCache() {
-    LOG.info("I am Guava cache! The expireAfterWrite is: "
-        + expireAfterWrite + " , the maximumSize: " + maximumSize);
-    CacheBuilder<Object, Object> builder = CacheBuilder.newBuilder()
+    cache = CacheBuilder.newBuilder()
         .expireAfterWrite(expireAfterWrite.getMillis(), TimeUnit.MILLISECONDS)
-        .maximumSize(maximumSize);
-    cache = builder.build(new LruCacheLoader());
+        .maximumSize(maximumSize).build(new LruCacheLoader());
   }
 
   @Override
