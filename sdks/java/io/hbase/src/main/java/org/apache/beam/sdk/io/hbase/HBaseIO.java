@@ -21,6 +21,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import java.io.IOException;
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -159,7 +160,8 @@ public class HBaseIO {
      */
     @Experimental
     public static Read read() {
-        return new Read(null, "", new SerializableScan(new Scan()));
+        return new Read(null, "", new SerializableScan(new Scan()),
+            new ClusterReaderIteratorFactory());
     }
 
     /**
@@ -176,7 +178,7 @@ public class HBaseIO {
         public Read withConfiguration(Configuration configuration) {
             checkNotNull(configuration, "conf");
             return new Read(new SerializableConfiguration(configuration),
-                    tableId, serializableScan);
+                    tableId, serializableScan, iteratorFactory);
         }
 
         /**
@@ -186,7 +188,7 @@ public class HBaseIO {
          */
         public Read withTableId(String tableId) {
             checkNotNull(tableId, "tableId");
-            return new Read(serializableConfiguration, tableId, serializableScan);
+            return new Read(serializableConfiguration, tableId, serializableScan, iteratorFactory);
         }
 
         /**
@@ -197,7 +199,9 @@ public class HBaseIO {
          */
         public Read withScan(Scan scan) {
             checkNotNull(scan, "scan");
-            return new Read(serializableConfiguration, tableId, new SerializableScan(scan));
+            return new Read(
+                serializableConfiguration, tableId, new SerializableScan(scan), iteratorFactory);
+
         }
 
         /**
@@ -237,10 +241,16 @@ public class HBaseIO {
         }
 
         private Read(SerializableConfiguration serializableConfiguration, String tableId,
-                     SerializableScan serializableScan) {
+                     SerializableScan serializableScan, ReaderIteratorFactory iteratorFactory) {
             this.serializableConfiguration = serializableConfiguration;
             this.tableId = tableId;
             this.serializableScan = serializableScan;
+            this.iteratorFactory = iteratorFactory;
+        }
+
+        public Read withReaderIteratorFactory(ReaderIteratorFactory iteratorFactory) {
+            checkNotNull(iteratorFactory, "ReaderIteratorFactory");
+            return new Read(serializableConfiguration, tableId, serializableScan, iteratorFactory);
         }
 
         @Override
@@ -281,6 +291,10 @@ public class HBaseIO {
             return serializableConfiguration.get();
         }
 
+        public Scan getScan() {
+            return serializableScan.get();
+        }
+
         /**
          * Returns the range of keys that will be read from the table.
          */
@@ -293,6 +307,7 @@ public class HBaseIO {
         private final SerializableConfiguration serializableConfiguration;
         private final String tableId;
         private final SerializableScan serializableScan;
+        private ReaderIteratorFactory iteratorFactory;
     }
 
     static class HBaseSource extends BoundedSource<Result> {
@@ -308,7 +323,8 @@ public class HBaseIO {
             checkNotNull(startKey, "startKey");
             Read newRead = new Read(read.serializableConfiguration, read.tableId,
                 new SerializableScan(
-                    new Scan(read.serializableScan.get()).setStartRow(startKey.getBytes())));
+                    new Scan(read.serializableScan.get()).setStartRow(startKey.getBytes())),
+                read.iteratorFactory);
             return new HBaseSource(newRead, estimatedSizeBytes);
         }
 
@@ -316,7 +332,8 @@ public class HBaseIO {
             checkNotNull(endKey, "endKey");
             Read newRead = new Read(read.serializableConfiguration, read.tableId,
                 new SerializableScan(
-                    new Scan(read.serializableScan.get()).setStopRow(endKey.getBytes())));
+                    new Scan(read.serializableScan.get()).setStopRow(endKey.getBytes())),
+                read.iteratorFactory);
             return new HBaseSource(newRead, estimatedSizeBytes);
         }
 
@@ -423,14 +440,14 @@ public class HBaseIO {
                 // We need to create a new copy of the scan and read to add the new ranges
                 Scan newScan = new Scan(scan).setStartRow(splitStart).setStopRow(splitStop);
                 Read newRead = new Read(read.serializableConfiguration, read.tableId,
-                        new SerializableScan(newScan));
+                        new SerializableScan(newScan), read.iteratorFactory);
                 sources.add(new HBaseSource(newRead, estimatedSizeBytes));
             }
             return sources;
         }
 
-    @Override
-    public List<? extends BoundedSource<Result>> split(
+        @Override
+        public List<? extends BoundedSource<Result>> split(
         long desiredBundleSizeBytes, PipelineOptions options) throws Exception {
             LOG.debug("desiredBundleSize {} bytes", desiredBundleSizeBytes);
             long estimatedSizeBytes = getEstimatedSizeBytes(options);
@@ -479,14 +496,64 @@ public class HBaseIO {
         }
     }
 
+    /**
+     * Abstract iterator of reader, mainly for testing.
+     */
+    public interface ReaderIterator {
+        Iterator<Result> iterator() throws IOException;
+        void close() throws IOException;
+    }
+
+    /**
+     * Factory for {@link ReaderIterator}.
+     */
+    public interface ReaderIteratorFactory extends Serializable {
+        ReaderIterator createReaderIterator(Read read) throws IOException;
+    }
+
+    private static class ClusterReaderIteratorFactory implements ReaderIteratorFactory {
+
+        @Override
+        public ReaderIterator createReaderIterator(final Read read) {
+            return new ReaderIterator() {
+
+                private Connection connection;
+                private ResultScanner scanner;
+
+                @Override
+                public Iterator<Result> iterator() throws IOException {
+                    connection = ConnectionFactory.createConnection(read.getConfiguration());
+                    TableName tableName = TableName.valueOf(read.tableId);
+                    Table table = connection.getTable(tableName);
+                    // [BEAM-2319] We have to clone the Scan because the underlying
+                    // scanner may mutate it.
+                    Scan scanClone = new Scan(read.serializableScan.get());
+                    scanner = table.getScanner(scanClone);
+                    return scanner.iterator();
+                }
+
+                @Override
+                public void close() throws IOException {
+                    if (scanner != null) {
+                        scanner.close();
+                        scanner = null;
+                    }
+                    if (connection != null) {
+                        connection.close();
+                        connection = null;
+                    }
+                }
+            };
+        }
+    }
+
     private static class HBaseReader extends BoundedSource.BoundedReader<Result> {
         private HBaseSource source;
-        private Connection connection;
-        private ResultScanner scanner;
         private Iterator<Result> iter;
         private Result current;
         private final ByteKeyRangeTracker rangeTracker;
         private long recordsReturned;
+        private ReaderIterator readerIterator;
 
         HBaseReader(HBaseSource source) {
             this.source = source;
@@ -499,15 +566,8 @@ public class HBaseIO {
         @Override
         public boolean start() throws IOException {
             HBaseSource source = getCurrentSource();
-            Configuration configuration = source.read.serializableConfiguration.get();
-            String tableId = source.read.tableId;
-            connection = ConnectionFactory.createConnection(configuration);
-            TableName tableName = TableName.valueOf(tableId);
-            Table table = connection.getTable(tableName);
-            // [BEAM-2319] We have to clone the Scan because the underlying scanner may mutate it.
-            Scan scanClone = new Scan(source.read.serializableScan.get());
-            scanner = table.getScanner(scanClone);
-            iter = scanner.iterator();
+            readerIterator = source.read.iteratorFactory.createReaderIterator(source.read);
+            iter = readerIterator.iterator();
             return advance();
         }
 
@@ -535,14 +595,7 @@ public class HBaseIO {
         @Override
         public void close() throws IOException {
             LOG.debug("Closing reader after reading {} records.", recordsReturned);
-            if (scanner != null) {
-                scanner.close();
-                scanner = null;
-            }
-            if (connection != null) {
-                connection.close();
-                connection = null;
-            }
+            readerIterator.close();
         }
 
         @Override

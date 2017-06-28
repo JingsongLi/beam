@@ -27,9 +27,13 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThat;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.io.hbase.HBaseIO.HBaseSource;
@@ -44,6 +48,8 @@ import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellScanner;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
@@ -288,12 +294,13 @@ public class HBaseIOTest {
         final String table = "TEST-FEW-ROWS-SPLIT-EXHAUSTIVE-TABLE";
         final int numRows = 7;
 
-        createTable(table);
-        writeData(table, numRows);
+        final List<Mutation> rows = makeTableData(numRows);
 
-        HBaseIO.Read read = HBaseIO.read().withConfiguration(conf).withTableId(table);
+        HBaseIO.Read read = HBaseIO.read().withConfiguration(conf).withTableId(table)
+            .withReaderIteratorFactory(new FakeReaderIteratorFactory(rows));
         HBaseSource source = new HBaseSource(read, null /* estimatedSizeBytes */)
             .withStartKey(ByteKey.of(48)).withEndKey(ByteKey.of(58));
+
         assertEquals(numRows, SourceTestUtils.readFromSource(source, null).size());
 
         assertSplitAtFractionExhaustive(source, null);
@@ -512,5 +519,52 @@ public class HBaseIOTest {
         PAssert.thatSingleton(rows.apply("Count" + transformId,
                 Count.<Result>globally())).isEqualTo(numElements);
         p.run().waitUntilFinish();
+    }
+
+    private static class FakeReaderIteratorFactory implements HBaseIO.ReaderIteratorFactory{
+
+        private List<Mutation> rows;
+
+        FakeReaderIteratorFactory(List<Mutation> rows) {
+            this.rows = rows;
+        }
+
+        @Override
+        public HBaseIO.ReaderIterator createReaderIterator(HBaseIO.Read read) throws IOException {
+            Scan scan = read.getScan();
+            byte[] startRow = scan.getStartRow();
+            byte[] stopRow = scan.getStopRow();
+            final Map<byte[], Result> results = new TreeMap<>(new Bytes.ByteArrayComparator());
+            for (Mutation mutation : rows) {
+                byte[] row = mutation.getRow();
+                if (Bytes.compareTo(row, startRow) >= 0
+                    && Bytes.compareTo(row, stopRow) < 0) {
+                    Result result = results.get(row);
+                    List<Cell> cells = new ArrayList<>();
+                    CellScanner cellScanner = mutation.cellScanner();
+                    while (cellScanner.advance()) {
+                        cells.add(cellScanner.current());
+                    }
+                    if (result != null) {
+                        cellScanner = result.cellScanner();
+                        while (cellScanner.advance()) {
+                            cells.add(cellScanner.current());
+                        }
+                    }
+                    results.put(row, Result.create(cells));
+                }
+            }
+
+            return new HBaseIO.ReaderIterator() {
+                @Override
+                public Iterator<Result> iterator() throws IOException {
+                    return results.values().iterator();
+                }
+
+                @Override
+                public void close() throws IOException {
+                }
+            };
+        }
     }
 }
