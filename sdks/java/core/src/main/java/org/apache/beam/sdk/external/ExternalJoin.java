@@ -17,12 +17,20 @@
  */
 package org.apache.beam.sdk.external;
 
+import com.google.common.cache.CacheBuilder;
+import com.google.common.cache.CacheLoader;
+import com.google.common.cache.LoadingCache;
 import com.google.common.collect.Iterables;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import javax.annotation.Nullable;
 import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -38,106 +46,144 @@ import org.joda.time.Duration;
 public class ExternalJoin<K, InputT, JoinT> extends
     PTransform<PCollection<KV<K, InputT>>, PCollection<KV<K, KV<InputT, JoinT>>>> {
 
-  private ExternalStateFactory<K, JoinT> stateFactory;
-  private ExternalStoreFactory<K, JoinT> storeFactory;
+  private Duration expireAfterWrite;
+  private long maximumSize;
   private int batchGetCount;
+  private ExternalKvStateFactory<K, JoinT> storeFactory;
 
   private ExternalJoin(
-      ExternalStateFactory<K, JoinT> stateFactory,
-      ExternalStoreFactory<K, JoinT> storeFactory,
-      int batchGetCount) {
-    this.stateFactory = stateFactory;
-    this.storeFactory = storeFactory;
+      Duration expireAfterWrite,
+      long maximumSize,
+      int batchGetCount,
+      ExternalKvStateFactory<K, JoinT> storeFactory) {
+    this.expireAfterWrite = expireAfterWrite;
+    this.maximumSize = maximumSize;
     this.batchGetCount = batchGetCount;
+    this.storeFactory = storeFactory;
   }
 
   public static <K, InputT, JoinT> ExternalJoin<K, InputT, JoinT>
-  by(ExternalStateFactory<K, JoinT> stateFactory,
-     ExternalStoreFactory<K, JoinT> storeFactory,
-     int batchGetCount) {
-    return new ExternalJoin<>(stateFactory, storeFactory, batchGetCount);
+  by(Duration expireAfterWrite,
+     long maximumSize,
+     int batchGetCount,
+     ExternalKvStateFactory<K, JoinT> storeFactory) {
+    return new ExternalJoin<>(expireAfterWrite, maximumSize, batchGetCount, storeFactory);
   }
 
   @Override
   public PCollection<KV<K, KV<InputT, JoinT>>> expand(PCollection<KV<K, InputT>> input) {
-    return input.apply(ParDo.of(new DoFn<KV<K, InputT>, KV<K, KV<InputT, JoinT>>>() {
+    return input.apply(ParDo.of(new ExternalJoinDoFn()));
+  }
 
-      private transient List<WindowedValue<KV<K, InputT>>> elements;
-      private transient Set<K> keys;
-      private transient ExternalState<K, JoinT> externalState;
-      @Setup
-      public void setup() {
-        elements = new ArrayList<>();
-        keys = new HashSet<>();
-        externalState = stateFactory.createExternalState(storeFactory.createExternalStore());
-        externalState.setup();
+  private class ExternalJoinDoFn extends DoFn<KV<K, InputT>, KV<K, KV<InputT, JoinT>>> {
+
+    private transient List<WindowedValue<KV<K, InputT>>> elements;
+    private transient Set<K> keys;
+    private transient ExternalKvState<K, JoinT> kvState;
+    private transient LoadingCache<K, JoinT> cache;
+
+    @Setup
+    public void setup() {
+      elements = new ArrayList<>();
+      keys = new HashSet<>();
+      cache = CacheBuilder.newBuilder()
+          .expireAfterWrite(expireAfterWrite.getMillis(), TimeUnit.MILLISECONDS)
+          .maximumSize(maximumSize)
+          .build(new ExternalLoader());
+      kvState = storeFactory.createExternalKvState();
+      kvState.setup();
+    }
+
+    @ProcessElement
+    public void processElement(ProcessContext c, BoundedWindow window) {
+      elements.add(WindowedValue.of(c.element(), c.timestamp(), window, PaneInfo.NO_FIRING));
+      keys.add(c.element().getKey());
+      if (keys.size() >= batchGetCount) {
+        join(new ProcessOutput(c));
       }
+    }
 
-      @ProcessElement
-      public void processElement(ProcessContext c, BoundedWindow window) {
-        elements.add(WindowedValue.of(c.element(), c.timestamp(), window, PaneInfo.NO_FIRING));
-        keys.add(c.element().getKey());
-        if (keys.size() >= batchGetCount) {
-          join(new ProcessOutput(c));
-        }
+    private void join(Output output) {
+      Map<K, JoinT> dimValues;
+      try {
+        dimValues = cache.getAll(keys);
+      } catch (ExecutionException e) {
+        throw new RuntimeException(e);
       }
-
-      private void join(Output output) {
-        Map<K, JoinT> dimValues = externalState.get(keys);
-        for (WindowedValue<KV<K, InputT>> element : elements) {
-          KV<K, InputT> input = element.getValue();
-          JoinT join = dimValues.get(input.getKey());
-          output.output(WindowedValue.of(
-              KV.of(input.getKey(), KV.of(input.getValue(), join)),
-              element.getTimestamp(),
-              element.getWindows(),
-              element.getPane()));
-        }
-        elements.clear();
-        keys.clear();
+      for (WindowedValue<KV<K, InputT>> element : elements) {
+        KV<K, InputT> input = element.getValue();
+        JoinT join = dimValues.get(input.getKey());
+        output.output(WindowedValue.of(
+            KV.of(input.getKey(), KV.of(input.getValue(), join)),
+            element.getTimestamp(),
+            element.getWindows(),
+            element.getPane()));
       }
+      elements.clear();
+      keys.clear();
+    }
 
-      @FinishBundle
-      public void finishBundle(FinishBundleContext c) throws Exception {
-        join(new FinishBundleOutput(c));
+    @FinishBundle
+    public void finishBundle(FinishBundleContext c) throws Exception {
+      join(new FinishBundleOutput(c));
+    }
+
+    @Teardown
+    public void teardown() {
+      kvState.teardown();
+    }
+
+    @Override
+    public Duration getAllowedTimestampSkew() {
+      return Duration.millis(Long.MAX_VALUE);
+    }
+
+    abstract class Output {
+      abstract void output(WindowedValue<KV<K, KV<InputT, JoinT>>> value);
+    }
+
+    class ProcessOutput extends Output {
+      private ProcessContext c;
+      ProcessOutput(ProcessContext c) {
+        this.c = c;
       }
+      @Override
+      void output(WindowedValue<KV<K, KV<InputT, JoinT>>> value) {
+        c.outputWithTimestamp(value.getValue(), value.getTimestamp());
+      }
+    }
 
-      @Teardown
-      public void teardown() {
-        externalState.teardown();
+    class FinishBundleOutput extends Output {
+      private FinishBundleContext c;
+      FinishBundleOutput(FinishBundleContext c) {
+        this.c = c;
+      }
+      @Override
+      void output(WindowedValue<KV<K, KV<InputT, JoinT>>> value) {
+        c.output(value.getValue(), value.getTimestamp(),
+            Iterables.getOnlyElement(value.getWindows()));
+      }
+    }
+
+    class ExternalLoader extends CacheLoader<K, JoinT> {
+
+      @Override
+      public JoinT load(@Nullable K k) throws Exception {
+        return kvState.get(k);
       }
 
       @Override
-      public Duration getAllowedTimestampSkew() {
-        return Duration.millis(Long.MAX_VALUE);
-      }
-
-      abstract class Output {
-        abstract void output(WindowedValue<KV<K, KV<InputT, JoinT>>> value);
-      }
-
-      class ProcessOutput extends Output {
-        private ProcessContext c;
-        ProcessOutput(ProcessContext c) {
-          this.c = c;
+      public Map<K, JoinT> loadAll(Iterable<? extends K> keys) throws Exception {
+        Map<K, JoinT> result = new HashMap<>();
+        Iterable<JoinT> values = kvState.get(keys);
+        Iterator<? extends K> keyIterator = keys.iterator();
+        Iterator<JoinT> valueIterator = values.iterator();
+        while (keyIterator.hasNext()) {
+          result.put(keyIterator.next(), valueIterator.next());
         }
-        @Override
-        void output(WindowedValue<KV<K, KV<InputT, JoinT>>> value) {
-          c.outputWithTimestamp(value.getValue(), value.getTimestamp());
-        }
+        return result;
       }
-
-      class FinishBundleOutput extends Output {
-        private FinishBundleContext c;
-        FinishBundleOutput(FinishBundleContext c) {
-          this.c = c;
-        }
-        @Override
-        void output(WindowedValue<KV<K, KV<InputT, JoinT>>> value) {
-          c.output(value.getValue(), value.getTimestamp(),
-              Iterables.getOnlyElement(value.getWindows()));
-        }
-      }
-    }));
+    }
   }
+
 }

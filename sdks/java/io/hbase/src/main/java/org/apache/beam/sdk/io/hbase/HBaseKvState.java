@@ -10,8 +10,8 @@ import java.util.Set;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
-import org.apache.beam.sdk.external.ExternalStore;
-import org.apache.beam.sdk.external.ExternalStoreFactory;
+import org.apache.beam.sdk.external.ExternalKvState;
+import org.apache.beam.sdk.external.ExternalKvStateFactory;
 import org.apache.beam.sdk.io.hadoop.SerializableConfiguration;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.util.CoderUtils;
@@ -27,7 +27,7 @@ import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.util.Bytes;
 
-public class HBaseExternalStore<K, V> implements ExternalStore<K, V> {
+public class HBaseKvState<K, V> implements ExternalKvState<K, V> {
 
   private SerializableConfiguration serializableConfiguration;
   private Coder<K> keyCoder;
@@ -38,7 +38,7 @@ public class HBaseExternalStore<K, V> implements ExternalStore<K, V> {
   private transient Connection connection;
   private transient Table table;
 
-  private HBaseExternalStore(
+  private HBaseKvState(
       Coder<K> keyCoder, SerializableFunction<Result, V> resultFn,
       String tableId, Set<String> familys, SerializableConfiguration conf) {
     this.keyCoder = keyCoder;
@@ -134,7 +134,7 @@ public class HBaseExternalStore<K, V> implements ExternalStore<K, V> {
     }
   }
 
-  public static class Factory<K, V> implements ExternalStoreFactory<K, V> {
+  public static class Factory<K, V> implements ExternalKvStateFactory<K, V> {
 
     private SerializableConfiguration conf;
     private Coder<K> keyCoder;
@@ -186,8 +186,8 @@ public class HBaseExternalStore<K, V> implements ExternalStore<K, V> {
     }
 
     @Override
-    public ExternalStore<K, V> createExternalStore() {
-      return new HBaseExternalStore<>(keyCoder, resultFn, tableId, familys, conf);
+    public ExternalKvState<K, V> createExternalKvState() {
+      return new HBaseKvState<>(keyCoder, resultFn, tableId, familys, conf);
     }
   }
 
