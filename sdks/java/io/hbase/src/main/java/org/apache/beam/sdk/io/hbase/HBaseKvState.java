@@ -89,7 +89,7 @@ public class HBaseKvState<K, V> implements ExternalKvState<K, V> {
   }
 
   @Override
-  public Iterable<Map.Entry<K, V>> scan() {
+  public Iterable<Map.Entry<K, V>> entries() {
 
     Scan scan = new Scan();
     scan.setCaching(500);

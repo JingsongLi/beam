@@ -12,7 +12,7 @@ public interface ExternalKvState<K, V> {
 
   Iterable<V> get(Iterable<? extends K> keys);
 
-  Iterable<Map.Entry<K, V>> scan();
+  Iterable<Map.Entry<K, V>> entries();
 
   void teardown();
 
