@@ -49,13 +49,13 @@ public class ExternalJoin<K, InputT, JoinT> extends
   private Duration expireAfterWrite;
   private long maximumSize;
   private int batchGetCount;
-  private ExternalKvStateFactory<K, JoinT> storeFactory;
+  private ExternalKvStoreFactory<K, JoinT> storeFactory;
 
   private ExternalJoin(
       Duration expireAfterWrite,
       long maximumSize,
       int batchGetCount,
-      ExternalKvStateFactory<K, JoinT> storeFactory) {
+      ExternalKvStoreFactory<K, JoinT> storeFactory) {
     this.expireAfterWrite = expireAfterWrite;
     this.maximumSize = maximumSize;
     this.batchGetCount = batchGetCount;
@@ -66,7 +66,7 @@ public class ExternalJoin<K, InputT, JoinT> extends
   by(Duration expireAfterWrite,
      long maximumSize,
      int batchGetCount,
-     ExternalKvStateFactory<K, JoinT> storeFactory) {
+     ExternalKvStoreFactory<K, JoinT> storeFactory) {
     return new ExternalJoin<>(expireAfterWrite, maximumSize, batchGetCount, storeFactory);
   }
 
@@ -79,7 +79,7 @@ public class ExternalJoin<K, InputT, JoinT> extends
 
     private transient List<WindowedValue<KV<K, InputT>>> elements;
     private transient Set<K> keys;
-    private transient ExternalKvState<K, JoinT> kvState;
+    private transient ExternalKvStore<K, JoinT> kvState;
     private transient LoadingCache<K, JoinT> cache;
 
     @Setup
@@ -90,7 +90,7 @@ public class ExternalJoin<K, InputT, JoinT> extends
           .expireAfterWrite(expireAfterWrite.getMillis(), TimeUnit.MILLISECONDS)
           .maximumSize(maximumSize)
           .build(new ExternalLoader());
-      kvState = storeFactory.createExternalKvState();
+      kvState = storeFactory.createExternalKvStore();
       kvState.setup();
     }
 

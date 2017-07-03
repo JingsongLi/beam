@@ -4,7 +4,7 @@ import java.util.Map;
 import org.apache.beam.sdk.annotations.Experimental;
 
 @Experimental
-public interface ExternalKvState<K, V> {
+public interface ExternalKvStore<K, V> {
 
   void setup();
 

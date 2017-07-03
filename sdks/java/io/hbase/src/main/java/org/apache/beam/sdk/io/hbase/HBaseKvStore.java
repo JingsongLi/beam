@@ -10,8 +10,10 @@ import java.util.Set;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
-import org.apache.beam.sdk.external.ExternalKvState;
-import org.apache.beam.sdk.external.ExternalKvStateFactory;
+import org.apache.beam.sdk.coders.StructuralByteArray;
+import org.apache.beam.sdk.external.ExternalKvStore;
+import org.apache.beam.sdk.external.ExternalKvStoreFactory;
+import org.apache.beam.sdk.external.ExternalRow;
 import org.apache.beam.sdk.io.hadoop.SerializableConfiguration;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.util.CoderUtils;
@@ -27,7 +29,7 @@ import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.util.Bytes;
 
-public class HBaseKvState<K, V> implements ExternalKvState<K, V> {
+public class HBaseKvStore<K, V> implements ExternalKvStore<K, V> {
 
   private SerializableConfiguration serializableConfiguration;
   private Coder<K> keyCoder;
@@ -38,7 +40,7 @@ public class HBaseKvState<K, V> implements ExternalKvState<K, V> {
   private transient Connection connection;
   private transient Table table;
 
-  private HBaseKvState(
+  private HBaseKvStore(
       Coder<K> keyCoder, SerializableFunction<Result, V> resultFn,
       String tableId, Set<String> familys, SerializableConfiguration conf) {
     this.keyCoder = keyCoder;
@@ -134,7 +136,7 @@ public class HBaseKvState<K, V> implements ExternalKvState<K, V> {
     }
   }
 
-  public static class Factory<K, V> implements ExternalKvStateFactory<K, V> {
+  public static class Factory<K, V> implements ExternalKvStoreFactory<K, V> {
 
     private SerializableConfiguration conf;
     private Coder<K> keyCoder;
@@ -142,23 +144,23 @@ public class HBaseKvState<K, V> implements ExternalKvState<K, V> {
     private String tableId;
     private Set<String> familys;
 
-    public static Factory<String, Map<String, String>>
-    ofString(String tableId, SerializableConfiguration conf) {
+    public static Factory<String, ExternalRow>
+    ofRow(String tableId, SerializableConfiguration conf) {
       return new Factory<>(
-          StringUtf8Coder.of(), new SerializableFunction<Result, Map<String, String>>() {
+          StringUtf8Coder.of(), new SerializableFunction<Result, ExternalRow>() {
         @Override
-        public Map<String, String> apply(Result input) {
-          Map<String, String> result = new HashMap<>();
+        public ExternalRow apply(Result input) {
+          Map<StructuralByteArray, StructuralByteArray> result = new HashMap<>();
           List<Cell> cells = input.listCells();
           if (cells == null) {
-            return result;
+            return new ExternalRow(result);
           }
           for (Cell cell : cells) {
-            String subKey = Bytes.toString(cell.getQualifierArray());
-            String value = Bytes.toString(cell.getValueArray());
-            result.put(subKey, value);
+            result.put(
+                new StructuralByteArray(cell.getQualifierArray()),
+                new StructuralByteArray(cell.getValueArray()));
           }
-          return result;
+          return new ExternalRow(result);
         }
       }, tableId, new HashSet<String>(), conf);
     }
@@ -186,8 +188,8 @@ public class HBaseKvState<K, V> implements ExternalKvState<K, V> {
     }
 
     @Override
-    public ExternalKvState<K, V> createExternalKvState() {
-      return new HBaseKvState<>(keyCoder, resultFn, tableId, familys, conf);
+    public ExternalKvStore<K, V> createExternalKvStore() {
+      return new HBaseKvStore<>(keyCoder, resultFn, tableId, familys, conf);
     }
   }
 
